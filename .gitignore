@@ -1,0 +1,8 @@
+**/node_modules
+!backend/vote/node_modules
+backend/packaged.yaml
+**/.idea
+**/package-lock.json
+ui/.amplifyrc
+ui/amplify
+**/aws-exports.js

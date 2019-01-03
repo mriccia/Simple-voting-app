@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  simple-websockets-voting-app
+
+  SAM Template for simple-websockets-voting-app that has the DynamoDB table and Lambda
+  functions needed to demonstrate the Websocket protocol on API Gateway.
+
+Parameters:
+  ConnectionsTableName:
+    Type: String
+    Default: 'simplevoting_connections'
+    Description: (Required) The name of the new DynamoDB to store connection identifiers for each connected clients. Minimum 3 characters
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: ^[A-Za-z_]+$
+    ConstraintDescription: 'Required. Can be characters and underscore only. No numbers or special characters allowed.'
+  VotesTableName:
+    Type: String
+    Default: 'simplevoting_votes'
+    Description: (Required) The name of the new DynamoDB to store each independent vote. Minimum 3 characters
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: ^[A-Za-z_]+$
+    ConstraintDescription: 'Required. Can be characters and underscore only. No numbers or special characters allowed.'
+  ResultsTableName:
+    Type: String
+    Default: 'simplevoting_results'
+    Description: (Required) The name of the new DynamoDB to store aggregated results. Minimum 3 characters
+    MinLength: 3
+    MaxLength: 50
+    AllowedPattern: ^[A-Za-z_]+$
+    ConstraintDescription: 'Required. Can be characters and underscore only. No numbers or special characters allowed.'
+
+Resources:
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: "connectionId"
+        AttributeType: "S"
+      KeySchema:
+      - AttributeName: "connectionId"
+        KeyType: "HASH"
+      BillingMode: "PAY_PER_REQUEST"
+      SSESpecification:
+        SSEEnabled: True
+      TableName: !Ref ConnectionsTableName
+  
+  VotesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: "connectionId"
+        AttributeType: "S"
+      - AttributeName: "pollId"
+        AttributeType: "S"
+      KeySchema:
+      - AttributeName: "connectionId"
+        KeyType: "HASH"
+      - AttributeName: "pollId"
+        KeyType: "RANGE"
+      BillingMode: "PAY_PER_REQUEST"
+      SSESpecification:
+        SSEEnabled: True
+      TableName: !Ref VotesTableName
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+  
+  ResultsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+      - AttributeName: "pollId"
+        AttributeType: "S"
+      - AttributeName: "voteValue"
+        AttributeType: "S"
+      KeySchema:
+      - AttributeName: "pollId"
+        KeyType: "HASH"
+      - AttributeName: "voteValue"
+        KeyType: "RANGE"
+      BillingMode: "PAY_PER_REQUEST"
+      SSESpecification:
+        SSEEnabled: True
+      TableName: !Ref ResultsTableName
+      StreamSpecification:
+        StreamViewType: KEYS_ONLY
+
+  OnConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: onconnect/
+      Handler: app.handler
+      MemorySize: 256
+      Runtime: nodejs8.10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ConnectionsTableName
+          TOPIC_ARN: !Ref SendToClientTopic
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName: !Ref ConnectionsTableName
+      - SNSPublishMessagePolicy:
+          TopicName: !GetAtt SendToClientTopic.TopicName
+
+  OnDisconnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ondisconnect/
+      Handler: app.handler
+      MemorySize: 256
+      Runtime: nodejs8.10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ConnectionsTableName
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName: !Ref ConnectionsTableName
+
+  AggregationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: vote/
+      Handler: app.aggregate
+      MemorySize: 256
+      Runtime: nodejs8.10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ResultsTableName
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName: !Ref ResultsTableName
+      Events:
+        DynamoDB1:
+          Type: DynamoDB
+          Properties:
+              Stream: !GetAtt [VotesTable, StreamArn]
+              StartingPosition: TRIM_HORIZON
+              BatchSize: 100
+
+  VoteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: vote/
+      Handler: app.vote
+      MemorySize: 256
+      Runtime: nodejs8.10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref VotesTableName
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName: !Ref VotesTableName
+      - Statement:
+        - Effect: Allow
+          Action:
+          - 'execute-api:ManageConnections'
+          Resource:
+          - 'arn:aws:execute-api:*:*:*/@connections/*'
+
+  SendToClientTopic:
+    Type: 'AWS::SNS::Topic'
+
+  SendToClientFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: vote/
+      Handler: app.send
+      MemorySize: 256
+      Runtime: nodejs8.10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ResultsTableName
+      Events:
+        SNS1:
+          Type: SNS
+          Properties:
+            Topic:
+              Ref: SendToClientTopic
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName: !Ref ResultsTableName
+      - Statement:
+        - Effect: Allow
+          Action:
+          - 'execute-api:ManageConnections'
+          Resource:
+          - 'arn:aws:execute-api:*:*:*/@connections/*'
+
+  UpdateAllClientsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: vote/
+      Handler: app.update
+      MemorySize: 256
+      Runtime: nodejs8.10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ConnectionsTableName
+          TOPIC_ARN: !Ref SendToClientTopic
+      Events:
+        ResultsStream:
+          Type: DynamoDB
+          Properties:
+              Stream: !GetAtt [ResultsTable, StreamArn]
+              StartingPosition: TRIM_HORIZON
+              BatchSize: 100
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName: !Ref ConnectionsTableName
+      - SNSPublishMessagePolicy:
+          TopicName: !GetAtt SendToClientTopic.TopicName
+Outputs:
+  OnConnectFunctionArn:
+    Description: "OnConnect function ARN"
+    Value: !GetAtt OnConnectFunction.Arn
+
+  OnDisconnectFunctionArn:
+    Description: "OnDisconnect function ARN"
+    Value: !GetAtt OnDisconnectFunction.Arn
+
+  VoteFuctionArn:
+    Description: "Vote function ARN"
+    Value: !GetAtt VoteFunction.Arn
